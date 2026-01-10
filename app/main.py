@@ -9,12 +9,12 @@ from collections import deque
 
 # Import shared models and processing functions
 # Import shared models and processing functions
-from eye_tracker import process_eye
-from head_pose_estimation import process_head_pose
-from person_and_phone import process_person_phone
+from app.services.vision.eye_tracker import process_eye
+from app.services.vision.head_pose_estimation import process_head_pose
+from app.services.vision.person_and_phone import process_person_phone
 from ultralytics import YOLO
-from mediapipe_handler import MediaPipeHandler
-from audio_handler import AudioHandler
+from app.services.vision.mediapipe_handler import MediaPipeHandler
+from app.services.audio_handler import AudioHandler
 from contextlib import asynccontextmanager
 
 # Initialize AudioHandler globally
@@ -141,8 +141,9 @@ def generate_frames():
     cap = cv2.VideoCapture(0)
     
     frame_count = 0
-    # Store last known alerts for object detection to persist them between checks
-    last_phone_alerts = []
+    # Store last known alerts to persist them when skipping frames
+    last_mp_alerts = []
+    last_yolo_alerts = []
 
     while True:
         success, frame = cap.read()
@@ -156,36 +157,36 @@ def generate_frames():
             # Collect all alerts for this frame
             frame_alerts = []
             
-            # 1. MediaPipe Face Mesh (Unified Eye & Head Tracking)
-            # mp_results = mediapipe_handler.process(frame)
-            
-            # if mp_results.multi_face_landmarks:
-            #     for face_landmarks in mp_results.multi_face_landmarks:
-            #         # Eye Tracking (Iris)
-            #         frame, eye_alerts = process_eye(frame, face_landmarks)
-            #         frame_alerts.extend(eye_alerts)
+            # 1. MediaPipe Face Mesh (Every 3 frames)
+            if frame_count % 3 == 0:
+                mp_results = mediapipe_handler.process(frame)
+                
+                current_mp_alerts = []
+                if mp_results.multi_face_landmarks:
+                    for face_landmarks in mp_results.multi_face_landmarks:
+                        # Eye Tracking (Iris)
+                        frame, eye_alerts = process_eye(frame, face_landmarks)
+                        current_mp_alerts.extend(eye_alerts)
 
-            #         # Head Pose (Landmarks)
-            #         frame, head_alerts = process_head_pose(frame, face_landmarks)
-            #         frame_alerts.extend(head_alerts)
-                    
-                    # Mouth detection removed as requested
+                        # Head Pose (Landmarks)
+                        frame, head_alerts = process_head_pose(frame, face_landmarks)
+                        current_mp_alerts.extend(head_alerts)
+                last_mp_alerts = current_mp_alerts
             
-            # Optimize: Run YOLO every 10 frames (~0.5 sec)
-            # if frame_count % 10 == 0:
-            #     # Actually, let's just run detection.
-            #     processed_frame, phone_alerts = process_person_phone(frame, yolo_model)
-            #     frame = processed_frame # Update frame with boxes
-            #     last_phone_alerts = phone_alerts
-            # else:
-            #     pass
+            frame_alerts.extend(last_mp_alerts)
             
-            # frame_alerts.extend(last_phone_alerts)
+            # 2. YOLO Object Detection (Every 30 frames)
+            if frame_count % 30 == 0:
+                processed_frame, phone_alerts = process_person_phone(frame, yolo_model)
+                frame = processed_frame 
+                last_yolo_alerts = phone_alerts
+            
+            frame_alerts.extend(last_yolo_alerts)
             
             # Check for audio alerts
-            audio_alerts = audio_handler.get_latest_alerts()
-            if audio_alerts:
-                frame_alerts.extend(audio_alerts)
+            # audio_alerts = audio_handler.get_latest_alerts()
+            # if audio_alerts:
+            #     frame_alerts.extend(audio_alerts)
             
             # Push unique alerts to global queue for SSE
             if frame_alerts:
