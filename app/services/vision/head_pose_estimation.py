@@ -134,7 +134,7 @@ def process_head_pose(img, landmarks):
     
     # Relaxed thresholds significantly to prevent false positives during natural minor movements
     THRESH_YAW = 45 
-    THRESH_PITCH = 35 
+    THRESH_PITCH = 45
     
     if yaw < -THRESH_YAW:
         alerts.append("Head Left")
