@@ -14,8 +14,21 @@ from head_pose_estimation import process_head_pose
 from person_and_phone import process_person_phone
 from ultralytics import YOLO
 from mediapipe_handler import MediaPipeHandler
+from audio_handler import AudioHandler
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+# Initialize AudioHandler globally
+audio_handler = AudioHandler()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    audio_handler.start()
+    yield
+    # Shutdown
+    audio_handler.stop()
+
+app = FastAPI(lifespan=lifespan)
 
 # Global event queue for alerts
 # Maxlen 1: We only care about the LATEST frame's alerts. 
@@ -144,30 +157,35 @@ def generate_frames():
             frame_alerts = []
             
             # 1. MediaPipe Face Mesh (Unified Eye & Head Tracking)
-            mp_results = mediapipe_handler.process(frame)
+            # mp_results = mediapipe_handler.process(frame)
             
-            if mp_results.multi_face_landmarks:
-                for face_landmarks in mp_results.multi_face_landmarks:
-                    # Eye Tracking (Iris)
-                    frame, eye_alerts = process_eye(frame, face_landmarks)
-                    frame_alerts.extend(eye_alerts)
+            # if mp_results.multi_face_landmarks:
+            #     for face_landmarks in mp_results.multi_face_landmarks:
+            #         # Eye Tracking (Iris)
+            #         frame, eye_alerts = process_eye(frame, face_landmarks)
+            #         frame_alerts.extend(eye_alerts)
 
-                    # Head Pose (Landmarks)
-                    frame, head_alerts = process_head_pose(frame, face_landmarks)
-                    frame_alerts.extend(head_alerts)
+            #         # Head Pose (Landmarks)
+            #         frame, head_alerts = process_head_pose(frame, face_landmarks)
+            #         frame_alerts.extend(head_alerts)
                     
                     # Mouth detection removed as requested
             
-            # Optimize: Run YOLO every 30 frames (~1 sec)
-            if frame_count % 20 == 0:
-                # Actually, let's just run detection.
-                processed_frame, phone_alerts = process_person_phone(frame, yolo_model)
-                frame = processed_frame # Update frame with boxes
-                last_phone_alerts = phone_alerts
-            else:
-                pass
+            # Optimize: Run YOLO every 10 frames (~0.5 sec)
+            # if frame_count % 10 == 0:
+            #     # Actually, let's just run detection.
+            #     processed_frame, phone_alerts = process_person_phone(frame, yolo_model)
+            #     frame = processed_frame # Update frame with boxes
+            #     last_phone_alerts = phone_alerts
+            # else:
+            #     pass
             
-            frame_alerts.extend(last_phone_alerts)
+            # frame_alerts.extend(last_phone_alerts)
+            
+            # Check for audio alerts
+            audio_alerts = audio_handler.get_latest_alerts()
+            if audio_alerts:
+                frame_alerts.extend(audio_alerts)
             
             # Push unique alerts to global queue for SSE
             if frame_alerts:

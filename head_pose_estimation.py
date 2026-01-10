@@ -91,48 +91,46 @@ def process_head_pose(img, landmarks):
     z = angles[2] # Roll
     
     # --- Neutral Pose Calibration ---
-    # We use global variables to store state across frames (since we are not using a class)
-    global calibration_frames, neutral_pose
+    global calibration_frames, neutral_pose, calibration_start_frame
     
-    # Initialize if not present (simple hack for module-level state)
     if 'calibration_frames' not in globals():
         calibration_frames = []
     if 'neutral_pose' not in globals():
         neutral_pose = None
+    if 'calibration_start_frame' not in globals():
+        calibration_start_frame = 0 # Counter for warmup
         
-    CALIBRATION_LIMIT = 50 # Frames to calibrate
+    calibration_start_frame += 1
+    WARMUP_FRAMES = 30 # Ignore first 30 frames for stability
+    CALIBRATION_LIMIT = 100 
     
     if neutral_pose is None:
+        if calibration_start_frame < WARMUP_FRAMES:
+             cv2.putText(img, "Initializing Camera...", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+             return img, alerts
+             
         calibration_frames.append([x, y, z])
         # Show Calibration Status
         progress = int((len(calibration_frames) / CALIBRATION_LIMIT) * 100)
-        cv2.putText(img, f"Calibrating Head Pose: {progress}%", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(img, "Please sit Upright & look at Screen", (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        cv2.putText(img, f"Calibrating: {progress}%", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        cv2.putText(img, "Sit Upright & Look at Screen", (20, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         
         if len(calibration_frames) >= CALIBRATION_LIMIT:
-            # Compute average
             calibration_frames = np.array(calibration_frames)
             neutral_pose = np.mean(calibration_frames, axis=0) # [avg_x, avg_y, avg_z]
-            # print(f"Calibration Complete. Neutral Pose: {neutral_pose}")
         
         return img, alerts
         
     # Apply Neutral Offset
     pitch = x - neutral_pose[0]
     yaw = y - neutral_pose[1]
-    roll = z - neutral_pose[2]
-    
-    # Thresholds (Tuned relative to neutral)
-    # Looking Left/Right (Yaw)
-    # Looking Up/Down (Pitch)
     
     # Visual Debugging
-    # Pitch: + is Down, - is Up (usually)
-    p_txt = "Down" if pitch > 0 else "Up"
+    p_txt = "Up" if pitch > 0 else "Down"
     y_txt = "Right" if yaw > 0 else "Left"
     
-    cv2.putText(img, f"Pitch: {int(pitch)} ({p_txt})", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-    cv2.putText(img, f"Yaw: {int(yaw)} ({y_txt})", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    cv2.putText(img, f"Pitch: {int(pitch)} [{p_txt}] (Neu: {int(neutral_pose[0])})", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+    cv2.putText(img, f"Yaw: {int(yaw)} [{y_txt}] (Neu: {int(neutral_pose[1])})", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
     
     # Relaxed thresholds significantly to prevent false positives during natural minor movements
     THRESH_YAW = 45 
@@ -143,11 +141,11 @@ def process_head_pose(img, landmarks):
     elif yaw > THRESH_YAW:
         alerts.append("Head Right")
         
-    # Corrected Logic: Positive Pitch is usually "Head Down"
-    if pitch > THRESH_PITCH:
+    # Corrected Logic: Negative Pitch is "Head Down"
+    if pitch < -THRESH_PITCH:
         alerts.append("Head Down")
-    elif pitch < -THRESH_PITCH:
-        alerts.append("Head Up")
+    # elif pitch > THRESH_PITCH:
+    #     alerts.append("Head Up")
         
     return img, alerts
 
