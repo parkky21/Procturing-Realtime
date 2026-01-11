@@ -24,6 +24,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+from app.services.violation_tracker import ViolationTracker
+
 # Initialize AudioHandler globally (For local mode only)
 audio_handler = AudioHandler()
 
@@ -155,9 +157,14 @@ def generate_frames():
     last_mp_alerts = []
     last_yolo_alerts = []
     
-    # Threshold Counters
-    head_alert_count = 0
-    eye_alert_count = 0
+    # Procturing Trackers
+    # Cooldown: 30 seconds
+    head_tracker = ViolationTracker(tolerance_seconds=2.0, cooldown_seconds=30.0)
+    eye_tracker = ViolationTracker(tolerance_seconds=2.0, cooldown_seconds=30.0)
+    # No person tracker needed for local debug usually, or added if needed?
+    # Adding for consistency.
+    person_tracker = ViolationTracker(tolerance_seconds=1.0, cooldown_seconds=30.0)
+    phone_tracker = ViolationTracker(tolerance_seconds=0.5, cooldown_seconds=30.0)
 
     while True:
         success, frame = cap.read()
@@ -176,42 +183,75 @@ def generate_frames():
                 mp_results = mediapipe_handler.process(frame)
                 
                 current_mp_alerts = []
+                
+                eye_bad = False
+                head_bad = False
+                
+                eye_details = []
+                head_details = []
+                
                 if mp_results.face_landmarks:
                     for face_landmarks in mp_results.face_landmarks:
                         # Eye Tracking (Iris)
                         frame, eye_raw = process_eye(frame, face_landmarks)
                         if eye_raw:
-                            eye_alert_count += 1
-                        else:
-                            eye_alert_count = 0
-                            
-                        if eye_alert_count >= 50:
-                            current_mp_alerts.extend(eye_raw)
+                            eye_bad = True
+                            eye_details.extend(eye_raw) # e.g. ["Looking Right"]
 
                         # Head Pose (Landmarks)
                         frame, head_raw = process_head_pose(frame, face_landmarks)
                         if head_raw:
-                            head_alert_count += 1
-                        else:
-                            head_alert_count = 0
-                        
-                        if head_alert_count >= 50:
-                            current_mp_alerts.extend(head_raw)
-                else:
-                    head_alert_count = 0
-                    eye_alert_count = 0
+                            head_bad = True
+                            head_details.extend(head_raw) # e.g. ["Head Down"]
+                
+                # Update Trackers
+                # Show warnings locally? For now let's only show VIOLATIONS to match production alerts
+                # Or maybe show warnings in yellow? Stick to violations for simplicity.
+                eye_status = eye_tracker.update(eye_bad)
+                if eye_status == "VIOLATION":
+                     if eye_details:
+                         current_mp_alerts.extend(list(set(eye_details)))
+                     else:
+                         current_mp_alerts.append("Eye Gaze Violation")
+                
+                head_status = head_tracker.update(head_bad)
+                if head_status == "VIOLATION":
+                    if head_details:
+                        current_mp_alerts.extend(list(set(head_details)))
+                    else:
+                        current_mp_alerts.append("Head Pose Violation")
                     
                 last_mp_alerts = current_mp_alerts
             
             frame_alerts.extend(last_mp_alerts)
             
             # 2. YOLO Object Detection (Every 30 frames)
-            if frame_count % 30 == 0:
+            if frame_count % 20 == 0:
                 processed_frame, phone_alerts = process_person_phone(frame, yolo_model)
-                frame = processed_frame 
-                last_yolo_alerts = phone_alerts
-            
-            frame_alerts.extend(last_yolo_alerts)
+                
+                # Track Person
+                person_bad = any("More than one person" in a for a in phone_alerts)
+                person_status = person_tracker.update(person_bad)
+                
+                # Track Phone
+                phone_bad = any(("Phone" in a or "Cell" in a or "Mobile" in a) for a in phone_alerts)
+                phone_status = phone_tracker.update(phone_bad)
+                
+                current_yolo_alerts = []
+                
+                if person_status == "VIOLATION":
+                     current_yolo_alerts.append("Multiple Persons Detected")
+                     
+                if phone_status == "VIOLATION":
+                     current_yolo_alerts.append("Mobile Phone Detected")
+                     
+                # Only add to frame_alerts ONCE when detected
+                frame_alerts.extend(current_yolo_alerts)
+                
+                # Do NOT persist
+                last_yolo_alerts = []
+                
+            # frame_alerts.extend(last_yolo_alerts) # REMOVED: Caused duplication
             
             # Check for audio alerts
             audio_alerts = audio_handler.get_latest_alerts()

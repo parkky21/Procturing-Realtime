@@ -9,6 +9,7 @@ from fastapi import WebSocket
 from ultralytics import YOLO
 
 from .audio_handler import AudioHandler
+from .violation_tracker import ViolationTracker
 from .vision.mediapipe_handler import MediaPipeHandler
 from .vision.eye_tracker import process_eye
 from .vision.head_pose_estimation import process_head_pose
@@ -17,7 +18,6 @@ from .vision.person_and_phone import process_person_phone
 logger = logging.getLogger(__name__)
 
 # Singleton YOLO model to save memory
-# Initialize carefully or lazily if needed. 
 try:
     GLOBAL_YOLO = YOLO("models/yolo11n.pt")
 except Exception as e:
@@ -40,15 +40,19 @@ class ProctoringSession:
         # Throttling Configuration
         self.frame_count = 0
         self.mp_interval = 3      # Run every 3 frames
-        self.yolo_interval = 30   # Run every 30 frames
+        self.yolo_interval = 20   # Run every 30 frames
         
         # State persistence for throttling
         self.last_mp_alerts: List[str] = []
         self.last_yolo_alerts: List[str] = []
         
-        # Threshold counters
-        self.head_alert_count = 0
-        self.eye_alert_count = 0
+        # Procturing Trackers (Time-based thresholds)
+        # 2.0 seconds tolerance for head/eye, 1.0 second for multiple people
+        # Cooldown: 30 seconds to prevent alert spamming.
+        self.head_tracker = ViolationTracker(tolerance_seconds=2.0, cooldown_seconds=30.0)
+        self.eye_tracker = ViolationTracker(tolerance_seconds=2.0, cooldown_seconds=30.0)
+        self.person_tracker = ViolationTracker(tolerance_seconds=1.0, cooldown_seconds=30.0)
+        self.phone_tracker = ViolationTracker(tolerance_seconds=0.5, cooldown_seconds=30.0)
         
         # Alert Queue (broadcast to event websocket)
         self.event_socket: Optional[WebSocket] = None
@@ -92,32 +96,42 @@ class ProctoringSession:
                 mp_results = self.mp_handler.process(frame)
                 current_mp_alerts = []
                 
+                # Default "bad" flags
+                eye_bad = False
+                head_bad = False
+                
+                # Capture specific details
+                eye_details = []
+                head_details = []
+                
                 if mp_results.face_landmarks:
                     for face_landmarks in mp_results.face_landmarks:
                         # Eye Tracking
                         _, eye_raw = process_eye(frame, face_landmarks)
                         if eye_raw:
-                            self.eye_alert_count += 1
-                        else:
-                            self.eye_alert_count = 0
-                            
-                        if self.eye_alert_count >= 50:
-                            current_mp_alerts.extend(eye_raw)
+                            eye_bad = True
+                            eye_details.extend(eye_raw) # e.g. ["Looking Left"]
                         
                         # Head Pose
                         _, head_raw = process_head_pose(frame, face_landmarks)
                         if head_raw:
-                            self.head_alert_count += 1
-                        else:
-                            self.head_alert_count = 0
-                            
-                        if self.head_alert_count >= 50:
-                            current_mp_alerts.extend(head_raw)
-                            
-                else:
-                    # No face detected -> reset counters
-                    self.eye_alert_count = 0
-                    self.head_alert_count = 0
+                            head_bad = True
+                            head_details.extend(head_raw) # e.g. ["Head Down"]
+                
+                # Update Trackers & Append Specifics
+                eye_status = self.eye_tracker.update(eye_bad)
+                if eye_status == "VIOLATION":
+                     if eye_details:
+                         current_mp_alerts.extend(list(set(eye_details)))
+                     else:
+                         current_mp_alerts.append("Eye Gaze Violation")
+                
+                head_status = self.head_tracker.update(head_bad)
+                if head_status == "VIOLATION":
+                    if head_details:
+                        current_mp_alerts.extend(list(set(head_details)))
+                    else:
+                        current_mp_alerts.append("Head Pose Violation")
 
                 self.last_mp_alerts = current_mp_alerts
             
@@ -127,9 +141,33 @@ class ProctoringSession:
             if GLOBAL_YOLO and (self.frame_count % self.yolo_interval == 0):
                 # YOLO handling
                 _, phone_alerts = process_person_phone(frame, GLOBAL_YOLO)
-                self.last_yolo_alerts = phone_alerts
+                
+                # Check for "More than one person detected" to track
+                person_bad = any("More than one person" in a for a in phone_alerts)
+                person_status = self.person_tracker.update(person_bad)
+                
+                # Check for Phone to track
+                # Heuristic: if any alert (other than multiple persons) contains "Phone/Cell/Mobile"
+                phone_detected = any(("Phone" in a or "Cell" in a or "Mobile" in a) for a in phone_alerts)
+                phone_status = self.phone_tracker.update(phone_detected)
+                
+                filtered_yolo_alerts = []
+                
+                # Add tracked alerts
+                if person_status == "VIOLATION":
+                    filtered_yolo_alerts.append("Multiple Persons Detected")
+
+                if phone_status == "VIOLATION":
+                    filtered_yolo_alerts.append("Mobile Phone Detected")
+                    
+                # Only add to frame_alerts ONCE when detected
+                frame_alerts.extend(filtered_yolo_alerts)
+                
+                # Do NOT persist them for next frames. 
+                # We want them to be "events" not "state".
+                self.last_yolo_alerts = [] 
             
-            frame_alerts.extend(self.last_yolo_alerts)
+            # frame_alerts.extend(self.last_yolo_alerts) # REMOVED: Caused duplication
             
             # 3. Audio Alerts (Poll from AudioHandler)
             # AudioHandler deque is thread-safe enough for this peek
