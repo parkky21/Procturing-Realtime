@@ -324,7 +324,6 @@ session_manager = SessionManager.get_instance()
 async def websocket_video(websocket: WebSocket, session_id: str):
     await websocket.accept()
     session = session_manager.get_or_create_session(session_id)
-    session.attach_video_socket(websocket)
     
     frame_counter = 0
     start_time = time.time()
