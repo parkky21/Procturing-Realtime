@@ -16,8 +16,15 @@ from ultralytics import YOLO
 from app.services.vision.mediapipe_handler import MediaPipeHandler
 from app.services.audio_handler import AudioHandler
 from contextlib import asynccontextmanager
+from fastapi import WebSocket, WebSocketDisconnect
+from app.services.session_manager import SessionManager
 
-# Initialize AudioHandler globally
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+# Initialize AudioHandler globally (For local mode only)
 audio_handler = AudioHandler()
 
 @asynccontextmanager
@@ -194,6 +201,7 @@ def generate_frames():
                 unique_alerts = list(set(frame_alerts))
                 # Push to queue
                 alert_queue.append(unique_alerts)
+                # logger.info(f"[LOCAL] Detections: {unique_alerts}")
 
             # NOTE: We removed cv2.putText to keep video clean
 
@@ -209,7 +217,7 @@ def generate_frames():
             frame_count += 1
                    
         except Exception as e:
-            print(f"Error processing frame: {e}")
+            logger.error(f"Error processing frame: {e}")
             continue
 
 @app.get("/video_feed")
@@ -231,6 +239,59 @@ async def event_stream():
             await asyncio.sleep(0.5) 
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+# --- WebSocket Microservice Endpoints ---
+
+session_manager = SessionManager.get_instance()
+
+@app.websocket("/ws/proctor/{session_id}/video")
+async def websocket_video(websocket: WebSocket, session_id: str):
+    await websocket.accept()
+    session = session_manager.get_or_create_session(session_id)
+    try:
+        while True:
+            # Expecting binary JPEG frames
+            data = await websocket.receive_bytes()
+            await session.process_video_frame(data)
+    except WebSocketDisconnect:
+        # Don't kill session immediately, other sockets might be active.
+        # Let some cleanup policy handle it or rely on explicit close.
+        pass
+    except Exception as e:
+        print(f"WS Video Error: {e}")
+
+@app.websocket("/ws/proctor/{session_id}/audio")
+async def websocket_audio(websocket: WebSocket, session_id: str):
+    await websocket.accept()
+    session = session_manager.get_or_create_session(session_id)
+    try:
+        while True:
+            # Expecting binary requests (raw audio)
+            data = await websocket.receive_bytes()
+            session.process_audio_chunk(data)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"WS Audio Error: {e}")
+
+@app.websocket("/ws/proctor/{session_id}/events")
+async def websocket_events(websocket: WebSocket, session_id: str):
+    await websocket.accept()
+    session = session_manager.get_or_create_session(session_id)
+    session.attach_event_socket(websocket)
+    try:
+        while True:
+            # Keep connection open. Client might send control messages or just listen.
+            # We just wait for disconnect.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        # If event socket disconnects, we might consider the user gone.
+        session_manager.remove_session(session_id)
+    except Exception as e:
+        print(f"WS Events Error: {e}")
+
 
 if __name__ == "__main__":
     import uvicorn

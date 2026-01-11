@@ -33,6 +33,7 @@ class AudioHandler:
         # Helper state
         self.is_running = False
         self.main_thread = None
+        self.dg_connection = None
         
         # Diarization state
         self.seen_speakers = set()
@@ -49,7 +50,7 @@ class AudioHandler:
             except Exception as e:
                 print(f"Error initializing Deepgram client: {e}")
 
-    def start(self):
+    def start(self, use_microphone=True):
         if not self.deepgram:
             print("Deepgram client not initialized. Cannot start audio proctoring.")
             return
@@ -61,9 +62,13 @@ class AudioHandler:
         self.seen_speakers.clear()
         
         # Start the main management thread
-        self.main_thread = threading.Thread(target=self._run_deepgram_session, daemon=True)
+        self.main_thread = threading.Thread(
+            target=self._run_deepgram_session, 
+            args=(use_microphone,), 
+            daemon=True
+        )
         self.main_thread.start()
-        print("Audio proctoring started (Deepgram nova-3).")
+        print(f"Audio proctoring started (Deepgram nova-3). Mic: {use_microphone}")
 
     def stop(self):
         if not self.is_running:
@@ -82,8 +87,25 @@ class AudioHandler:
         while self.audio_alerts:
             alerts.append(self.audio_alerts.popleft())
         return alerts
+    
+    def process_audio_chunk(self, data: bytes):
+        """
+        Push external audio data (e.g. from LiveKit) to Deepgram.
+        """
+        # Ensure connection exists and is ready
+        if self.is_running and self.dg_connection and len(data) > 0:
+             try:
+                 # Depending on SDK version this might need verify. 
+                 # 'send' or 'send_media' is used for raw bytes.
+                 if hasattr(self.dg_connection, 'send_media'):
+                    self.dg_connection.send_media(data)
+                 elif hasattr(self.dg_connection, 'send'):
+                    self.dg_connection.send(data)
+             except Exception as e:
+                 # print(f"Error sending audio chunk: {e}")
+                 pass
 
-    def _run_deepgram_session(self):
+    def _run_deepgram_session(self, use_microphone=True):
         """
         Manages the Deepgram connection lifecycle within a thread.
         Emulates the 'with connect(...) as connection' pattern.
@@ -92,12 +114,9 @@ class AudioHandler:
             # Connect using the new SDK V3 pattern options directly in connect, or via kwargs override
             # We want 'nova-3', 'diarize=True', 'smart_format=True'
             
-            # Note: connect() usually takes arguments thatmap to LiveOptions
-            # We explicitly pass them as kwargs here, which the SDK usually supports or via 'options' obj
-            
             with self.deepgram.listen.v1.connect(
                 model="nova-3",
-                language="en-IN",
+                language="en-US",
                 smart_format=True,
                 diarize=True,
                 encoding="linear16",
@@ -105,6 +124,8 @@ class AudioHandler:
                 sample_rate=RATE
             ) as connection:
                 
+                self.dg_connection = connection
+
                 # --- Setup Callbacks ---
                 def on_message(result, **kwargs):
                     self._process_transcript(result)
@@ -116,26 +137,59 @@ class AudioHandler:
                 connection.on(EventType.ERROR, on_error)
                 
                 # --- Start Listening ---
-                # Based on user example, we might need to call start_listening if it's not auto-started
-                # or if we want to run the receiving loop.
                 if hasattr(connection, 'start_listening'):
                     listen_thread = threading.Thread(target=connection.start_listening, daemon=True)
                     listen_thread.start()
 
-                # --- Start Audio Streaming Thread ---
-                stream_thread = threading.Thread(
-                    target=self._stream_audio_input, 
-                    args=(connection,), 
-                    daemon=True
-                )
-                stream_thread.start()
+                # --- Start Audio Streaming Thread (Only if using Mic) ---
+                if use_microphone:
+                    stream_thread = threading.Thread(
+                        target=self._stream_audio_input, 
+                        args=(connection,), 
+                        daemon=True
+                    )
+                    stream_thread.start()
+
+                # --- KeepAlive Loop ---
+                # To prevent 1011 limit if audio is silent/sparse
+                def keep_alive():
+                    logging.info("Deepgram KeepAlive loop started.")
+                    last_ka = time.time()
+                    while self.is_running and self.dg_connection:
+                        # Send KeepAlive every 5 seconds
+                        if time.time() - last_ka > 5:
+                            try:
+                                # SDK v3: 'send' might not exist. 'send_media' is clear.
+                                # Send a silent audio frame as keepalive
+                                if hasattr(connection, 'keep_alive'):
+                                    connection.keep_alive()
+                                else:
+                                    # 20ms of silence at 16kHz mono 16-bit = 640 bytes
+                                    # Just sending a small buffer.
+                                    silent_frame = b'\x00' * 320
+                                    # Default to send_media for data
+                                    if hasattr(connection, 'send_media'):
+                                        connection.send_media(silent_frame)
+                                    else:
+                                        # Fallback (very old or very new SDK?)
+                                        pass
+                                
+                                # logging.debug("Sent KeepAlive (Silence)")
+                                last_ka = time.time()
+                            except Exception as e:
+                                logging.error(f"KeepAlive failed: {e}")
+                                break
+                        time.sleep(1)
+                
+                ka_thread = threading.Thread(target=keep_alive, daemon=True)
+                ka_thread.start()
 
                 # --- Wait Loop ---
                 # Keep this thread alive until stop() is called, keeping the 'with' block active
                 while self.is_running:
                     time.sleep(0.1)
                 
-                # When loop breaks, block exits, cleanup happens.
+                self.dg_connection = None
 
         except Exception as e:
             print(f"Error in Deepgram session loop: {e}")
