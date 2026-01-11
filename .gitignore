@@ -10,4 +10,4 @@ coco models
 .DS_Store
 runs/
 
-audio/
+audio/runs/

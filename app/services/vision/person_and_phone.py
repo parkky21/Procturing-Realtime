@@ -12,7 +12,7 @@ def process_person_phone(img, yolo_model):
     
     # Run inference
     # verbose=False to clean up logs, conf=0.5 for confidence threshold
-    results = yolo_model(img, verbose=False, conf=0.5) 
+    results = yolo_model(img, verbose=False, conf=0.5, save=False) 
     
     person_count = 0
     phone_detected = False
