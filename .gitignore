@@ -1,7 +1,6 @@
 .venv
 __pycache__
 .env
-
 face_detection
 
 eye_tracking/
