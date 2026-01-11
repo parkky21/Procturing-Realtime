@@ -185,7 +185,7 @@ def generate_frames():
                         else:
                             eye_alert_count = 0
                             
-                        if eye_alert_count >= 3:
+                        if eye_alert_count >= 50:
                             current_mp_alerts.extend(eye_raw)
 
                         # Head Pose (Landmarks)
@@ -195,7 +195,7 @@ def generate_frames():
                         else:
                             head_alert_count = 0
                         
-                        if head_alert_count >= 3:
+                        if head_alert_count >= 50:
                             current_mp_alerts.extend(head_raw)
                 else:
                     head_alert_count = 0
