@@ -66,28 +66,6 @@ def process_person_phone(img, yolo_model):
     
     return img, alerts
 
-def detect_phone_and_person(video_path):
-    # Standalone testing function
-    yolo_model = YOLO("models/yolo11n.pt") 
-    cap = cv2.VideoCapture(video_path if video_path else 0)
-    
-    if not cap.isOpened():
-        return
 
-    while(True):
-        ret, image = cap.read()
-        if not ret:
-            break
-            
-        image, alerts = process_person_phone(image, yolo_model)
-        for alert in alerts:
-            print(alert)
-
-        cv2.imshow('Prediction', image)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
 
 

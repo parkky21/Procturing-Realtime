@@ -46,24 +46,44 @@ class ProctoringSession:
         self.last_mp_alerts: List[str] = []
         self.last_yolo_alerts: List[str] = []
         
+        # Threshold counters
+        self.head_alert_count = 0
+        self.eye_alert_count = 0
+        
         # Alert Queue (broadcast to event websocket)
         self.event_socket: Optional[WebSocket] = None
         
     async def process_video_frame(self, frame_bytes: bytes):
         """
         Process a single video frame (JPEG bytes).
-        Returns list of alerts found in this frame.
+        Offloads heavy processing to a thread to avoid blocking the asyncio loop (WS Heartbeats).
         """
         if not self.is_active:
             return
 
+        loop = asyncio.get_running_loop()
+        try:
+            # Run CPU-bound analysis in a thread
+            unique_alerts = await loop.run_in_executor(None, self._analyze_frame_sync, frame_bytes)
+            
+            # Broadcast results (I/O bound) in the main loop
+            if unique_alerts:
+                await self.broadcast_alerts(unique_alerts)
+                
+        except Exception as e:
+            logger.error(f"Error processing video frame for {self.session_id}: {e}")
+
+    def _analyze_frame_sync(self, frame_bytes: bytes) -> List[str]:
+        """
+        Synchronous, CPU-intensive frame analysis.
+        """
         try:
             # Decode JPEG
             nparr = np.frombuffer(frame_bytes, np.uint8)
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
             if frame is None:
-                return
+                return []
 
             frame_alerts = []
             
@@ -71,13 +91,34 @@ class ProctoringSession:
             if self.frame_count % self.mp_interval == 0:
                 mp_results = self.mp_handler.process(frame)
                 current_mp_alerts = []
+                
                 if mp_results.face_landmarks:
                     for face_landmarks in mp_results.face_landmarks:
-                        _, eye_alerts = process_eye(frame, face_landmarks)
-                        current_mp_alerts.extend(eye_alerts)
+                        # Eye Tracking
+                        _, eye_raw = process_eye(frame, face_landmarks)
+                        if eye_raw:
+                            self.eye_alert_count += 1
+                        else:
+                            self.eye_alert_count = 0
+                            
+                        if self.eye_alert_count >= 3:
+                            current_mp_alerts.extend(eye_raw)
                         
-                        _, head_alerts = process_head_pose(frame, face_landmarks)
-                        current_mp_alerts.extend(head_alerts)
+                        # Head Pose
+                        _, head_raw = process_head_pose(frame, face_landmarks)
+                        if head_raw:
+                            self.head_alert_count += 1
+                        else:
+                            self.head_alert_count = 0
+                            
+                        if self.head_alert_count >= 5:
+                            current_mp_alerts.extend(head_raw)
+                            
+                else:
+                    # No face detected -> reset counters
+                    self.eye_alert_count = 0
+                    self.head_alert_count = 0
+
                 self.last_mp_alerts = current_mp_alerts
             
             frame_alerts.extend(self.last_mp_alerts)
@@ -91,20 +132,20 @@ class ProctoringSession:
             frame_alerts.extend(self.last_yolo_alerts)
             
             # 3. Audio Alerts (Poll from AudioHandler)
+            # AudioHandler deque is thread-safe enough for this peek
             audio_alerts = self.audio_handler.get_latest_alerts()
             if audio_alerts:
                 frame_alerts.extend(audio_alerts)
 
             self.frame_count += 1
             
-            # Broadcast if alerts exist
             if frame_alerts:
-                unique_alerts = list(set(frame_alerts))
-                # print(f"[{self.session_id}] Detections: {unique_alerts}")
-                await self.broadcast_alerts(unique_alerts)
-                
+                return list(set(frame_alerts))
+            return []
+            
         except Exception as e:
-            logger.error(f"Error processing video frame for {self.session_id}: {e}")
+            logger.error(f"Sync analysis error: {e}")
+            return []
 
     def process_audio_chunk(self, audio_bytes: bytes):
         """

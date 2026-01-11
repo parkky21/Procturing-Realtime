@@ -154,6 +154,10 @@ def generate_frames():
     # Store last known alerts to persist them when skipping frames
     last_mp_alerts = []
     last_yolo_alerts = []
+    
+    # Threshold Counters
+    head_alert_count = 0
+    eye_alert_count = 0
 
     while True:
         success, frame = cap.read()
@@ -175,12 +179,28 @@ def generate_frames():
                 if mp_results.face_landmarks:
                     for face_landmarks in mp_results.face_landmarks:
                         # Eye Tracking (Iris)
-                        frame, eye_alerts = process_eye(frame, face_landmarks)
-                        current_mp_alerts.extend(eye_alerts)
+                        frame, eye_raw = process_eye(frame, face_landmarks)
+                        if eye_raw:
+                            eye_alert_count += 1
+                        else:
+                            eye_alert_count = 0
+                            
+                        if eye_alert_count >= 3:
+                            current_mp_alerts.extend(eye_raw)
 
                         # Head Pose (Landmarks)
-                        frame, head_alerts = process_head_pose(frame, face_landmarks)
-                        current_mp_alerts.extend(head_alerts)
+                        frame, head_raw = process_head_pose(frame, face_landmarks)
+                        if head_raw:
+                            head_alert_count += 1
+                        else:
+                            head_alert_count = 0
+                        
+                        if head_alert_count >= 3:
+                            current_mp_alerts.extend(head_raw)
+                else:
+                    head_alert_count = 0
+                    eye_alert_count = 0
+                    
                 last_mp_alerts = current_mp_alerts
             
             frame_alerts.extend(last_mp_alerts)
@@ -269,12 +289,13 @@ async def websocket_video(websocket: WebSocket, session_id: str):
             # Expecting binary JPEG frames
             data = await websocket.receive_bytes()
             await session.process_video_frame(data)
-    except WebSocketDisconnect:
+    except WebSocketDisconnect as e:
+        logger.info(f"WS Video Client Disconnected with code: {e.code}")
         # Don't kill session immediately, other sockets might be active.
         # Let some cleanup policy handle it or rely on explicit close.
         pass
     except Exception as e:
-        print(f"WS Video Error: {e}")
+        logger.error(f"WS Video Error: {e}")
 
 @app.websocket("/ws/proctor/{session_id}/audio")
 async def websocket_audio(websocket: WebSocket, session_id: str):

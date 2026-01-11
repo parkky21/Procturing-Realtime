@@ -170,42 +170,4 @@ def process_eye(img, landmarks):
 
     return img, alerts
 
-def track_eye(video_path=None):
-    if video_path is None or video_path == "":
-        video_path = 0 # Use webcam
-    cap = cv2.VideoCapture(video_path)
-    ret, img = cap.read()
-    if not ret:
-        print("Failed to capture video from camera. Check camera permissions.")
-        cap.release()
-        cv2.destroyAllWindows()
-        return
-    thresh = img.copy()
 
-    while(True):
-        ret, img = cap.read()
-        rects = find_faces(img, face_model)
-
-        if not ret:
-            break
-        
-        # Original loop body repurposed to use process_eye for verification
-        # Note: In a real refactor we should use process_eye here, but for now 
-        # I'm just adding process_eye and keeping track_eye mostly as is or 
-        # simplifying it. Actually, I will rewrite track_eye to use process_eye.
-        
-        draw_img, alerts = process_eye(img, face_model, landmark_model)
-        for alert in alerts:
-            print(alert)
-        
-        cv2.imshow('eyes', draw_img)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-        
-    cap.release()
-    cv2.destroyAllWindows()
-
-
-    # ... rest of function ...
-if __name__ == "__main__":
-    track_eye()

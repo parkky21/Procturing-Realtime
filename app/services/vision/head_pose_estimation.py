@@ -149,6 +149,3 @@ def process_head_pose(img, landmarks):
     #     alerts.append("Head Up")
         
     return img, alerts
-
-def detect_head_pose(video_path):
-    pass # Legacy function, not used
