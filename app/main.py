@@ -360,10 +360,25 @@ async def websocket_video(websocket: WebSocket, session_id: str):
 async def websocket_audio(websocket: WebSocket, session_id: str):
     await websocket.accept()
     session = session_manager.get_or_create_session(session_id)
+    
+    chunk_counter = 0
+    start_time = time.time()
+    
     try:
         while True:
             # Expecting binary requests (raw audio)
             data = await websocket.receive_bytes()
+            
+            # Rate Calculation
+            chunk_counter += 1
+            if chunk_counter % 50 == 0:
+                elapsed = time.time() - start_time
+                if elapsed > 0:
+                    rate = chunk_counter / elapsed
+                    logger.info(f"Session {session_id} Audio Chunks/s: {rate:.2f} (Chunks: {chunk_counter})")
+                    chunk_counter = 0
+                    start_time = time.time()
+                    
             session.process_audio_chunk(data)
     except WebSocketDisconnect:
         pass
