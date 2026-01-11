@@ -324,10 +324,30 @@ session_manager = SessionManager.get_instance()
 async def websocket_video(websocket: WebSocket, session_id: str):
     await websocket.accept()
     session = session_manager.get_or_create_session(session_id)
+    session.attach_video_socket(websocket)
+    
+    frame_counter = 0
+    start_time = time.time()
+    
     try:
         while True:
             # Expecting binary JPEG frames
             data = await websocket.receive_bytes()
+            
+            # FPS Calculation
+            frame_counter += 1
+            if frame_counter % 30 == 0:
+                elapsed = time.time() - start_time
+                if elapsed > 0:
+                    fps = frame_counter / elapsed
+                    logger.info(f"Session {session_id} Video FPS: {fps:.2f} (Frames: {frame_counter})")
+                    # Reset periodically to keep average relevant to recent performance? 
+                    # Or keep cumulative? Cumulative is safer for overall stats, 
+                    # but rolling is better for live debugging.
+                    # Let's do a rolling window every 30 frames.
+                    frame_counter = 0
+                    start_time = time.time()
+            
             await session.process_video_frame(data)
     except WebSocketDisconnect as e:
         logger.info(f"WS Video Client Disconnected with code: {e.code}")
