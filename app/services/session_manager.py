@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Singleton YOLO model to save memory
 # Initialize carefully or lazily if needed. 
 try:
-    GLOBAL_YOLO = YOLO("yolo11n.pt")
+    GLOBAL_YOLO = YOLO("models/yolo11n.pt")
 except Exception as e:
     logger.error(f"Failed to load YOLO model: {e}")
     GLOBAL_YOLO = None

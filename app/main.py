@@ -43,7 +43,7 @@ app = FastAPI(lifespan=lifespan)
 alert_queue = deque(maxlen=1) 
 
 # Initialize Models
-yolo_model = YOLO("yolo11n.pt") 
+yolo_model = YOLO("models/yolo11n.pt") 
 mediapipe_handler = MediaPipeHandler()
  
 # Lock not strictly necessary for append/pop left in CPython due to GIL but good practice for clarity needed? 
