@@ -71,8 +71,8 @@ class ProctoringSession:
             if self.frame_count % self.mp_interval == 0:
                 mp_results = self.mp_handler.process(frame)
                 current_mp_alerts = []
-                if mp_results.multi_face_landmarks:
-                    for face_landmarks in mp_results.multi_face_landmarks:
+                if mp_results.face_landmarks:
+                    for face_landmarks in mp_results.face_landmarks:
                         _, eye_alerts = process_eye(frame, face_landmarks)
                         current_mp_alerts.extend(eye_alerts)
                         

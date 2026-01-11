@@ -46,6 +46,20 @@ A python module designed to run within a LiveKit Worker.
 - Python 3.8+
 - [Deepgram API Key](https://deepgram.com)
 
+### MacOS Troubleshooting
+If you encounter `Library not loaded` errors with `torchcodec` particularly related to `libavutil` or `ffmpeg`, you may need to specify the library path manually.
+
+We have provided a helper script for this:
+```bash
+sh run_pipeline.sh
+```
+
+Or manually:
+```bash
+export DYLD_LIBRARY_PATH=/opt/homebrew/lib:$DYLD_LIBRARY_PATH
+uv run test.py
+```
+
 ### Steps
 1. Clone the repository.
 2. Install dependencies (using `uv` is recommended for speed):
@@ -55,15 +69,12 @@ A python module designed to run within a LiveKit Worker.
    # OR standard pip
    pip install -r requirements.txt
    ```
-3. Set Environment Variables:
-   Create a `.env` file:
-   ```env
-   DEEPGRAM_API_KEY=your_deepgram_key_here
-   ```
+### 3. Pyannote Audio (Speaker Diarization)
+This project uses `pyannote.audio` for local speaker detection (replacing Deepgram).
+- **Token Required**: You must have a HuggingFace token with access to `pyannote/speaker-diarization-community-1`.
+- **Setup**: The token is currently hardcoded in `app/services/audio_handler.py` (variable `TOKEN`). Ensure this is valid.
 
----
-
-## Usage
+### 4. Running the Application
 
 ### 1. Start the AI Server
 ```bash

@@ -26,7 +26,8 @@ def process_head_pose(img, landmarks):
         return img, alerts
 
     h, w, _ = img.shape
-    mesh_points = np.array([np.multiply([p.x, p.y], [w, h]).astype(int) for p in landmarks.landmark])
+    # New API: landmarks is already a list of NormalizedLandmark
+    mesh_points = np.array([np.multiply([p.x, p.y], [w, h]).astype(int) for p in landmarks])
 
     # 3D Model Points (Standard Generic Face)
     model_points = np.array([

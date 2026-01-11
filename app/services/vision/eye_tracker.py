@@ -23,7 +23,8 @@ def process_eye(img, landmarks):
         return img, alerts
 
     h, w, _ = img.shape
-    mesh_points = np.array([np.multiply([p.x, p.y], [w, h]).astype(int) for p in landmarks.landmark])
+    # New API: landmarks is already a list of NormalizedLandmark objects
+    mesh_points = np.array([np.multiply([p.x, p.y], [w, h]).astype(int) for p in landmarks])
 
     # Indices for landmarks
     LEFT_IRIS = [474, 475, 476, 477]

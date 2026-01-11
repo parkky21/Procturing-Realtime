@@ -4,19 +4,15 @@ import time
 from collections import deque
 import logging
 from dotenv import load_dotenv
-
+import numpy as np
+import torch
+from pyannote.audio import Pipeline
 import pyaudio
-
-# Try importing deepgram; strictly needed for this functionality
-try:
-    from deepgram import DeepgramClient
-    from deepgram.core.events import EventType
-except ImportError:
-    DeepgramClient = None
-    print("Warning: deepgram-sdk or pyaudio not installed. Audio proctoring will fail.")
 
 # Load environment variables
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # Audio Configuration
 CHUNK = 1024
@@ -24,62 +20,101 @@ FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
 
+# Pyannote Configuration
+TOKEN = os.getenv("HF_TOKEN")
+PROCESS_INTERVAL = 5 # seconds
+MAX_WINDOW_DURATION = 10 # seconds
+
+# Global Pipeline Singleton
+GLOBAL_PIPELINE = None
+PIPELINE_LOCK = threading.Lock()
+
+def get_pipeline():
+    global GLOBAL_PIPELINE
+    with PIPELINE_LOCK:
+        if GLOBAL_PIPELINE is None:
+            logger.info("Loading Pyannote Pipeline (CPU)...")
+            try:
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-community-1",
+                    token=TOKEN
+                )
+                # Force CPU or let it default. 
+                # Usually defaults to CPU if no CUDA. 
+                # To be strict: pipeline.to(torch.device("cpu"))
+                pipeline.to(torch.device("cpu"))
+                GLOBAL_PIPELINE = pipeline
+                logger.info("Pyannote Pipeline loaded.")
+            except Exception as e:
+                logger.error(f"Error loading Pyannote pipeline: {e}")
+    return GLOBAL_PIPELINE
+
 class AudioHandler:
     def __init__(self, api_key=None):
-        self.api_key = api_key or os.getenv("DEEPGRAM_API_KEY")
-        self.deepgram = None
+        # API key not used anymore but kept for signature compatibility
         self.audio_alerts = deque(maxlen=1)
         
-        # Helper state
+        # State
         self.is_running = False
-        self.main_thread = None
-        self.dg_connection = None
+        self.process_thread = None
+        self.mic_thread = None
+        
+        # Audio Buffer (Stores float32 samples)
+        self.audio_buffer = np.zeros((0, 1), dtype='float32')
+        self.buffer_lock = threading.Lock()
         
         # Diarization state
-        self.seen_speakers = set()
-
-        if not self.api_key:
-            print("Warning: DEEPGRAM_API_KEY not found. Audio proctoring will be disabled.")
-            return
-
-        if DeepgramClient:
-            try:
-                # Initialize SDK
-                # Initialize SDK with explicit key
-                self.deepgram = DeepgramClient(api_key=self.api_key)
-            except Exception as e:
-                print(f"Error initializing Deepgram client: {e}")
+        self.last_process_time = 0
 
     def start(self, use_microphone=True):
-        if not self.deepgram:
-            print("Deepgram client not initialized. Cannot start audio proctoring.")
-            return
-
         if self.is_running:
             return
 
         self.is_running = True
-        self.seen_speakers.clear()
         
-        # Start the main management thread
-        self.main_thread = threading.Thread(
-            target=self._run_deepgram_session, 
-            args=(use_microphone,), 
+        # Ensure pipeline is loaded
+        get_pipeline()
+        
+        # Start Processing Thread
+        self.process_thread = threading.Thread(
+            target=self._run_processing_loop, 
             daemon=True
         )
-        self.main_thread.start()
-        print(f"Audio proctoring started (Deepgram nova-3). Mic: {use_microphone}")
+        self.process_thread.start()
+        
+        # Start Mic Capture Thread if requested
+        if use_microphone:
+            self.start_microphone()
+        
+        logger.info(f"Audio handler started (Pyannote). Mic: {use_microphone}")
+
+    def start_microphone(self):
+        """Starts the microphone capture thread if not already running."""
+        if self.mic_thread and self.mic_thread.is_alive():
+            return
+
+        try:
+            self.mic_thread = threading.Thread(
+                target=self._stream_audio_input, 
+                daemon=True
+            )
+            self.mic_thread.start()
+            logger.info("Microphone capture started.")
+        except ImportError:
+            logger.warning("PyAudio not available for microphone capture.")
 
     def stop(self):
-        if not self.is_running:
-            return
-            
         self.is_running = False
-        if self.main_thread:
-            self.main_thread.join(timeout=3.0)
-            self.main_thread = None
         
-        print("Audio proctoring stopped.")
+        if self.process_thread:
+            self.process_thread.join(timeout=2.0)
+            self.process_thread = None
+            
+        if self.mic_thread:
+            self.mic_thread.join(timeout=2.0)
+            self.mic_thread = None
+        
+        logger.info("Audio handler stopped.")
 
     def get_latest_alerts(self):
         """Return list of new alerts since last call."""
@@ -90,114 +125,89 @@ class AudioHandler:
     
     def process_audio_chunk(self, data: bytes):
         """
-        Push external audio data (e.g. from LiveKit) to Deepgram.
+        Push external audio data (PCM bytes) to the buffer.
         """
-        # Ensure connection exists and is ready
-        if self.is_running and self.dg_connection and len(data) > 0:
-             try:
-                 # Depending on SDK version this might need verify. 
-                 # 'send' or 'send_media' is used for raw bytes.
-                 if hasattr(self.dg_connection, 'send_media'):
-                    self.dg_connection.send_media(data)
-                 elif hasattr(self.dg_connection, 'send'):
-                    self.dg_connection.send(data)
-             except Exception as e:
-                 # print(f"Error sending audio chunk: {e}")
-                 pass
-
-    def _run_deepgram_session(self, use_microphone=True):
-        """
-        Manages the Deepgram connection lifecycle within a thread.
-        Emulates the 'with connect(...) as connection' pattern.
-        """
-        try:
-            # Connect using the new SDK V3 pattern options directly in connect, or via kwargs override
-            # We want 'nova-3', 'diarize=True', 'smart_format=True'
+        if not self.is_running:
+            return
             
-            with self.deepgram.listen.v1.connect(
-                model="nova-3",
-                language="en-US",
-                smart_format=True,
-                diarize=True,
-                encoding="linear16",
-                channels=CHANNELS,
-                sample_rate=RATE
-            ) as connection:
+        try:
+            # 1. Convert bytes (int16) to float32 numpy array
+            # Assume 16-bit PCM, 16kHz
+            audio_int16 = np.frombuffer(data, dtype=np.int16)
+            audio_float32 = audio_int16.astype(np.float32) / 32768.0
+            
+            # Reshape to (N, 1) for pyannote (channels last or logic handles it)
+            # Pyannote expects (channels, time) usually for tensor, but we store as (time, channels) for concatenation convenience
+            chunk = audio_float32.reshape(-1, 1)
+            
+            with self.buffer_lock:
+                self.audio_buffer = np.concatenate((self.audio_buffer, chunk))
                 
-                self.dg_connection = connection
-
-                # --- Setup Callbacks ---
-                def on_message(result, **kwargs):
-                    self._process_transcript(result)
-
-                def on_error(error, **kwargs):
-                    print(f"Deepgram Error: {error}")
-
-                connection.on(EventType.MESSAGE, on_message)
-                connection.on(EventType.ERROR, on_error)
-                
-                # --- Start Listening ---
-                if hasattr(connection, 'start_listening'):
-                    listen_thread = threading.Thread(target=connection.start_listening, daemon=True)
-                    listen_thread.start()
-
-                # --- Start Audio Streaming Thread (Only if using Mic) ---
-                if use_microphone:
-                    stream_thread = threading.Thread(
-                        target=self._stream_audio_input, 
-                        args=(connection,), 
-                        daemon=True
-                    )
-                    stream_thread.start()
-
-                # --- KeepAlive Loop ---
-                # To prevent 1011 limit if audio is silent/sparse
-                def keep_alive():
-                    logging.info("Deepgram KeepAlive loop started.")
-                    last_ka = time.time()
-                    while self.is_running and self.dg_connection:
-                        # Send KeepAlive every 5 seconds
-                        if time.time() - last_ka > 5:
-                            try:
-                                # SDK v3: 'send' might not exist. 'send_media' is clear.
-                                # Send a silent audio frame as keepalive
-                                if hasattr(connection, 'keep_alive'):
-                                    connection.keep_alive()
-                                else:
-                                    # 20ms of silence at 16kHz mono 16-bit = 640 bytes
-                                    # Just sending a small buffer.
-                                    silent_frame = b'\x00' * 320
-                                    # Default to send_media for data
-                                    if hasattr(connection, 'send_media'):
-                                        connection.send_media(silent_frame)
-                                    else:
-                                        # Fallback (very old or very new SDK?)
-                                        pass
-                                
-                                # logging.debug("Sent KeepAlive (Silence)")
-                                last_ka = time.time()
-                            except Exception as e:
-                                logging.error(f"KeepAlive failed: {e}")
-                                break
-                        time.sleep(1)
-                
-                ka_thread = threading.Thread(target=keep_alive, daemon=True)
-                ka_thread.start()
-
-                # --- Wait Loop ---
-                # Keep this thread alive until stop() is called, keeping the 'with' block active
-                while self.is_running:
-                    time.sleep(0.1)
-                
-                self.dg_connection = None
-
+                # Enforce max window size immediately to save memory? 
+                # Or do it in processing loop. Doing it here prevents infinite growth between checks.
+                max_samples = int(MAX_WINDOW_DURATION * RATE)
+                if len(self.audio_buffer) > max_samples:
+                    self.audio_buffer = self.audio_buffer[-max_samples:]
+                    
         except Exception as e:
-            print(f"Error in Deepgram session loop: {e}")
-            self.is_running = False
+            logger.error(f"Error processing audio chunk: {e}")
 
-    def _stream_audio_input(self, connection):
+    def _run_processing_loop(self):
         """
-        Captures audio from PyAudio and sends it to Deepgram.
+        Periodically runs diarization on the buffer.
+        """
+        while self.is_running:
+            current_time = time.time()
+            
+            if current_time - self.last_process_time >= PROCESS_INTERVAL:
+                
+                # Get a snapshot of the buffer
+                with self.buffer_lock:
+                    if len(self.audio_buffer) < RATE * 1: # Need at least 1 second
+                        time.sleep(0.5)
+                        continue
+                    current_window = self.audio_buffer.copy()
+                
+                self._analyze_audio(current_window)
+                self.last_process_time = time.time()
+            
+            time.sleep(0.5)
+
+    def _analyze_audio(self, buffer):
+        pipeline = get_pipeline()
+        if not pipeline:
+            return
+
+        try:
+            # Prepare input for pipeline {"waveform": (channels, time), "sample_rate": 16000}
+            # Buffer is (time, channels), so Transpose it.
+            waveform = torch.from_numpy(buffer).float().T
+            audio_in_memory = {"waveform": waveform, "sample_rate": RATE}
+            
+            # logger.info(f"Running diarization on {len(buffer)/RATE:.1f}s audio...")
+            output = pipeline(audio_in_memory)
+            
+            unique_speakers = set()
+            for turn, speaker in output.speaker_diarization:
+                unique_speakers.add(speaker)
+                # logger.debug(f"Detected {speaker}: {turn.start:.1f}s - {turn.end:.1f}s")
+            
+            if len(unique_speakers) > 1:
+                self._trigger_alert("Multiple speakers detected!")
+                
+        except Exception as e:
+            logger.error(f"Error in diarization: {e}")
+
+    def _trigger_alert(self, msg):
+        # Avoid spamming if the last alert was the same (simple debounce)
+        # Note: deque maxlen=1 so this just checks the one sitting there or we append new.
+        if not self.audio_alerts or self.audio_alerts[-1] != msg:
+            self.audio_alerts.append(msg)
+            logger.warning(f"Audio Alert: {msg}")
+
+    def _stream_audio_input(self):
+        """
+        Captures audio from PyAudio and feeds process_audio_chunk.
         """
         p = pyaudio.PyAudio()
         stream = None
@@ -210,57 +220,21 @@ class AudioHandler:
                 frames_per_buffer=CHUNK
             )
             
+            logger.info("Microphone capture started.")
+            
             while self.is_running:
-                data = stream.read(CHUNK, exception_on_overflow=False)
-                if data:
-                    # Send media as per user example
-                    connection.send_media(data)
+                try:
+                    data = stream.read(CHUNK, exception_on_overflow=False)
+                    if data:
+                        self.process_audio_chunk(data)
+                except Exception as e:
+                    logger.error(f"Mic read error: {e}")
+                    time.sleep(0.1)
                     
         except Exception as e:
-            print(f"Error streaming audio: {e}")
+            logger.error(f"Error opening mic stream: {e}")
         finally:
             if stream:
                 stream.stop_stream()
                 stream.close()
             p.terminate()
-
-    def _process_transcript(self, message):
-        """
-        Process the transcript result to detect multiple speakers.
-        """
-        try:
-            # Parse message. SDK v3 usually returns an object.
-            # We access properties safely.
-            
-            channel = getattr(message, 'channel', None)
-            if channel and hasattr(channel, 'alternatives'):
-                alt = channel.alternatives[0]
-                words = alt.words
-                
-                # words is a list of Word objects
-                if words:
-                    current_chunk_speakers = set()
-                    for word in words:
-                        # 'speaker' is the ID of the speaker
-                        if hasattr(word, 'speaker'):
-                            spk = word.speaker
-                            self.seen_speakers.add(spk)
-                            current_chunk_speakers.add(spk)
-                    
-                    # Logic 1: Simultaneous
-                    if len(current_chunk_speakers) > 1:
-                        self._trigger_alert("Multiple voices detected simultaneously!")
-                        
-                    # Logic 2: Cumulative
-                    if len(self.seen_speakers) > 1:
-                        self._trigger_alert("Multiple speakers detected in session!")
-                            
-        except Exception as e:
-            # print(f"Error processing transcript: {e}") 
-            pass
-
-    def _trigger_alert(self, msg):
-        # Avoid spamming
-        if not self.audio_alerts or self.audio_alerts[-1] != msg:
-            self.audio_alerts.append(msg)
-            print(f"Audio Alert: {msg} (Speakers found: {self.seen_speakers})")

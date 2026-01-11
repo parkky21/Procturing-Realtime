@@ -30,7 +30,7 @@ audio_handler = AudioHandler()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    audio_handler.start()
+    audio_handler.start(use_microphone=False)
     yield
     # Shutdown
     audio_handler.stop()
@@ -147,6 +147,9 @@ def generate_frames():
     # Attempt to open camera (0 is usually default webcam)
     cap = cv2.VideoCapture(0)
     
+    # Start microphone if not already running (Local Mode)
+    audio_handler.start_microphone()
+    
     frame_count = 0
     # Store last known alerts to persist them when skipping frames
     last_mp_alerts = []
@@ -169,8 +172,8 @@ def generate_frames():
                 mp_results = mediapipe_handler.process(frame)
                 
                 current_mp_alerts = []
-                if mp_results.multi_face_landmarks:
-                    for face_landmarks in mp_results.multi_face_landmarks:
+                if mp_results.face_landmarks:
+                    for face_landmarks in mp_results.face_landmarks:
                         # Eye Tracking (Iris)
                         frame, eye_alerts = process_eye(frame, face_landmarks)
                         current_mp_alerts.extend(eye_alerts)
@@ -191,9 +194,9 @@ def generate_frames():
             frame_alerts.extend(last_yolo_alerts)
             
             # Check for audio alerts
-            # audio_alerts = audio_handler.get_latest_alerts()
-            # if audio_alerts:
-            #     frame_alerts.extend(audio_alerts)
+            audio_alerts = audio_handler.get_latest_alerts()
+            if audio_alerts:
+                frame_alerts.extend(audio_alerts)
             
             # Push unique alerts to global queue for SSE
             if frame_alerts:
@@ -202,8 +205,19 @@ def generate_frames():
                 # Push to queue
                 alert_queue.append(unique_alerts)
                 # logger.info(f"[LOCAL] Detections: {unique_alerts}")
+                
+                # Draw alerts on frame
+                y_offset = 50
+                for alert in unique_alerts:
+                    color = (0, 0, 255) # Red
+                    if "Audio" in alert or "speakers" in alert:
+                         color = (255, 0, 0) # Blue for audio
+                    
+                    cv2.putText(frame, str(alert), (30, y_offset), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+                    y_offset += 40
 
-            # NOTE: We removed cv2.putText to keep video clean
+            # NOTE: We removed cv2.putText to keep video clean -> Added back for local debug
 
             # Encode frame
             ret, buffer = cv2.imencode('.jpg', frame)
