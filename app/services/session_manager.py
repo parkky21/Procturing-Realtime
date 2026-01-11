@@ -101,7 +101,7 @@ class ProctoringSession:
                         else:
                             self.eye_alert_count = 0
                             
-                        if self.eye_alert_count >= 3:
+                        if self.eye_alert_count >= 10:
                             current_mp_alerts.extend(eye_raw)
                         
                         # Head Pose
@@ -111,7 +111,7 @@ class ProctoringSession:
                         else:
                             self.head_alert_count = 0
                             
-                        if self.head_alert_count >= 5:
+                        if self.head_alert_count >= 10:
                             current_mp_alerts.extend(head_raw)
                             
                 else:
